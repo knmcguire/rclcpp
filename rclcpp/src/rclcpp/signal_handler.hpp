@@ -50,6 +50,14 @@ namespace rclcpp
  * - safely notifying the dedicated signal handling thread when receiving SIGINT/SIGTERM
  * - implementation of all of the signal handling work, like shutting down contexts
  *
+ * On Windows, in addition to the C-runtime signal() based handler, a native
+ * console control handler is installed via SetConsoleCtrlHandler(). This is
+ * required because a process created with CREATE_NEW_PROCESS_GROUP has CTRL+C
+ * disabled by default (Windows makes an implicit SetConsoleCtrlHandler(NULL, TRUE)
+ * call on its behalf), and std::signal()/signal() does not re-enable it. The
+ * console control handler maps CTRL_C_EVENT / CTRL_BREAK_EVENT / CTRL_CLOSE_EVENT
+ * onto the same deferred shutdown path used by the POSIX signal handler.
+ *
  * \internal
  */
 class SignalHandler final
@@ -102,15 +110,16 @@ private:
   using signal_handler_type = void (*)(int);
 #endif
 
-
   SignalHandler() = default;
 
   ~SignalHandler();
 
   SignalHandler(const SignalHandler &) = delete;
   SignalHandler(SignalHandler &&) = delete;
+
   SignalHandler &
   operator=(const SignalHandler &) = delete;
+
   SignalHandler &&
   operator=(SignalHandler &&) = delete;
 
@@ -128,6 +137,26 @@ private:
   static
   void
   signal_handler(int signal_value);
+#endif
+
+#if defined(_WIN32)
+  /// Native Windows console control handler.
+  /**
+   * Registered with SetConsoleCtrlHandler(). Handles CTRL_C_EVENT,
+   * CTRL_BREAK_EVENT and CTRL_CLOSE_EVENT and funnels them into the same
+   * deferred shutdown path used by signal_handler(). This is required for a
+   * process launched in a new process group (CREATE_NEW_PROCESS_GROUP), where
+   * CTRL+C is disabled and the C-runtime signal() handler is never invoked.
+   *
+   * This is invoked by the OS on a dedicated handler thread, so it must be
+   * thread-safe. It only performs an atomic store plus a semaphore release
+   * (via signal_handler_common()), which is safe.
+   *
+   * \return TRUE if the event was handled, FALSE to pass it to the next handler.
+   */
+  static
+  BOOL WINAPI
+  win32_ctrl_handler(DWORD dwCtrlType);
 #endif
 
   /// Target of the dedicated signal handling thread.
@@ -189,18 +218,22 @@ private:
 
   // Whether or not a signal has been received.
   std::atomic_bool signal_received_ = false;
-  // The signal number that was received.
+
+  // The signal number of the most recently received signal.
   std::atomic_int signal_number_ = 0;
+
   // A thread to which signal handling tasks are deferred.
   std::thread signal_handler_thread_;
 
   // A mutex used to synchronize the install() and uninstall() methods.
   std::mutex install_mutex_;
+
   // Whether or not the signal handler has been installed.
   std::atomic_bool installed_ = false;
 
   // Whether or not the semaphore for wait_for_signal is setup.
   std::atomic_bool wait_for_signal_is_setup_;
+
   // Storage for the wait_for_signal semaphore.
 #if defined(_WIN32)
   HANDLE signal_handler_sem_;
