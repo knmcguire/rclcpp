@@ -102,6 +102,34 @@ SignalHandler::signal_handler(int signum)
 }
 #endif
 
+#if defined(_WIN32)
+BOOL WINAPI
+SignalHandler::win32_ctrl_handler(DWORD dwCtrlType)
+{
+  switch (dwCtrlType) {
+    case CTRL_C_EVENT:
+      // Equivalent to SIGINT.
+      SignalHandler::get_global_signal_handler().signal_handler_common(SIGINT);
+      return TRUE;
+    case CTRL_BREAK_EVENT:
+      // Closer to SIGTERM. Report it as SIGTERM so downstream behavior and
+      // logging match a termination request rather than an interactive interrupt.
+      SignalHandler::get_global_signal_handler().signal_handler_common(SIGTERM);
+      return TRUE;
+    case CTRL_CLOSE_EVENT:
+      // Console window is closing (or the process is being ended). Treat it as
+      // a termination request so contexts get a chance to shut down cleanly.
+      // Note: the OS gives a limited grace period before killing the process.
+      SignalHandler::get_global_signal_handler().signal_handler_common(SIGTERM);
+      return TRUE;
+    default:
+      // CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT and anything else: not handled
+      // here, let the next handler in the list run.
+      return FALSE;
+  }
+}
+#endif
+
 rclcpp::Logger &
 SignalHandler::get_logger()
 {
@@ -154,6 +182,18 @@ SignalHandler::install(SignalHandlerOptions signal_handler_options)
       old_sigterm_handler_ = set_signal_handler(SIGTERM, handler_argument);
     }
 
+#if defined(_WIN32)
+    // On Windows, register a native console control handler in addition to the
+    // C-runtime signal() handler above. This is required for processes created
+    // with CREATE_NEW_PROCESS_GROUP, where CTRL+C is disabled and signal() is
+    // never invoked. See the class documentation for details.
+    if (!SetConsoleCtrlHandler(&SignalHandler::win32_ctrl_handler, TRUE)) {
+      throw std::runtime_error(
+              "SetConsoleCtrlHandler() failed to install in install(): " +
+              std::to_string(GetLastError()));
+    }
+#endif
+
     signal_handler_thread_ = std::thread(&SignalHandler::deferred_signal_handler, this);
   } catch (...) {
     installed_.store(false);
@@ -186,6 +226,15 @@ SignalHandler::uninstall()
     {
       set_signal_handler(SIGTERM, old_sigterm_handler_);
     }
+#if defined(_WIN32)
+    // Remove the native console control handler installed in install().
+    if (!SetConsoleCtrlHandler(&SignalHandler::win32_ctrl_handler, FALSE)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SetConsoleCtrlHandler() failed to uninstall in uninstall(): %lu",
+        GetLastError());
+    }
+#endif
     signal_handlers_options_ = SignalHandlerOptions::None;
     RCLCPP_DEBUG(get_logger(), "SignalHandler::uninstall(): notifying deferred signal handler");
     notify_signal_handler();
