@@ -674,10 +674,31 @@ function(test_on_all_rmws)
   )
   ament_add_test_label(test_qos_event${target_suffix} mimick)
 
-  ament_add_ros_isolated_gmock_test(test_generic_pubsub
-    TEST_NAME test_generic_pubsub${target_suffix}
-    ENV ${rmw_implementation_env_var}
-  )
+  # Registered via ament_add_test() directly instead of
+  # ament_add_ros_isolated_gmock_test(): the latter names the gtest result file
+  # after the executable target, so every RMW variant wrote to the same
+  # test_generic_pubsub.gtest.xml and overwrote the others' results.
+  if(TARGET test_generic_pubsub)
+    set(_test_name "test_generic_pubsub${target_suffix}")
+    set(_result_file "${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/${_test_name}.gtest.xml")
+    set(_test_env ${rmw_implementation_env_var})
+    if(rmw_implementation STREQUAL "rmw_zenoh_cpp")
+      # Debug output from the Zenoh core (see rmw_zenoh README, "Logging").
+      list(APPEND _test_env "RUST_LOG=zenoh=info,zenoh_transport=debug")
+    endif()
+    ament_add_test("${_test_name}"
+      COMMAND "$<TARGET_FILE:test_generic_pubsub>" "--gtest_output=xml:${_result_file}"
+      OUTPUT_FILE "${CMAKE_BINARY_DIR}/ament_cmake_gmock/${_test_name}.txt"
+      RESULT_FILE "${_result_file}"
+      RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+      ENV ${_test_env}
+      TIMEOUT 60
+    )
+    set_tests_properties("${_test_name}" PROPERTIES
+      REQUIRED_FILES "$<TARGET_FILE:test_generic_pubsub>"
+      LABELS "gmock"
+    )
+  endif()
 
   ament_add_ros_isolated_gmock_test(test_add_callback_groups_to_executor
     TEST_NAME test_add_callback_groups_to_executor${target_suffix}
